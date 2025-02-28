@@ -12,6 +12,9 @@ settings.toml
 # VS Code directory
 .vscode/
 
+# Diagram project file
+*.drawio
+
 # Distribution / packaging
 .Python
 build/
