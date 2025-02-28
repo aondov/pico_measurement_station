@@ -179,7 +179,7 @@ def send_log_file(pool: socketpool.SocketPool, server_ip: str, input_data: str, 
                 err_flag = True
                 break
 
-            if len(block) <= 512:
+            if len(block) < 512:
                 logprint("s", "tftp", "File transfer complete!")
                 break
 
