@@ -1,0 +1,8 @@
+WIFI_SSID = "<ssid>"
+WIFI_PASSWORD = "<password>"
+
+NTP_SERVER = "pool.ntp.org"
+TIMEZONE = 1
+
+TFTP_SERVER = "<tftp-server-ip>"
+TFTP_PORT = 69
