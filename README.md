@@ -22,7 +22,7 @@ TFTP_SERVER = "<tftp-server-ip>"
 TFTP_PORT = 69
 ```
 
-2. **Measurement settings** - Directly in "*code.py*" file, it is possible to configure measurement features, e.g. how many cycles should be executed or how long should the program sleep between these cycles.
+2. **Measurement settings** - Directly in the "*code.py*" file, it is possible to configure measurement features, e.g. how many cycles should be executed or how long should the program sleep between these cycles.
 
 ```python
 def configuration() -> dict:
@@ -45,7 +45,7 @@ def configuration() -> dict:
 
 ## Connection diagram
 
-Sensors are connected to the Raspberry Pi Pico in the following way:
+Sensors are connected to the Raspberry Pi Pico W in the following way:
 
 | Pico  | HC-SR04  | NTC Thermistor  |
 |---|---|---|
