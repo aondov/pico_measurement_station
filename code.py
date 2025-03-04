@@ -8,9 +8,12 @@ import board
 import time
 import rtc
 import json
+import alarm
+import microcontroller
 import adafruit_ntp
 import adafruit_datetime as datetime
 import adafruit_hcsr04
+
 
 # WiFi details
 SSID = os.getenv('WIFI_SSID')
@@ -114,7 +117,7 @@ def connect_wifi() -> socketpool.SocketPool:
 
 
 # Send log file to a TFTP server
-def send_log_file(pool: socketpool.SocketPool, server_ip: str, input_data: str, filename: str) -> None:
+def send_log_file(pool: socketpool.SocketPool, server_ip: str, input_data: str, filename: str) -> bool:
     try:
         err_flag = False
         
@@ -153,7 +156,7 @@ def send_log_file(pool: socketpool.SocketPool, server_ip: str, input_data: str, 
             logprint("e", "tftp", "Server did not ACK WRQ message properly.")
             sock.close()
             indicate_error()
-            return
+            return False
 
         if VERBOSE:
             logprint("s", "tftp", f"Server acknowledged WRQ. New port: {server_address[1]}")
@@ -185,17 +188,20 @@ def send_log_file(pool: socketpool.SocketPool, server_ip: str, input_data: str, 
 
             offset += 512
             block_number += 1
-            time.sleep(0.5)  # Wait to avoid flooding the server
+            time.sleep(1)  # Wait to avoid flooding the server
 
         # Gracefully close the connection socket and release its resources
         sock.close()
 
         if err_flag:
             indicate_error()
+            return False
+        
+        return True
     except Exception as e:
         logprint("e", "tftp", str(e))
         indicate_error()
-        return
+        return False
 
 
 # Get average value from input values
@@ -259,7 +265,7 @@ def measure_temp(thermistor, cycles = 10, sleeping = 3) -> float:
     
     logprint("s", "temp", f"Measured temperature (final): {round(final_temp, 1)}°C")
     
-    return final_temp
+    return round(final_temp, 1)
 
 
 # Execute 10 distance measurements and return median value from these measurements
@@ -288,7 +294,7 @@ def measure_dist(sonar, cycles = 10, sleeping = 1) -> float:
     
     logprint("s", "dist", f"Measured distance (final): {round(final_dist, 1)} cm")
             
-    return final_dist
+    return round(final_dist, 1)
 
 
 # Check if internal RTC is set
@@ -306,88 +312,176 @@ def is_wifi_connected() -> bool:
 def separator() -> None:
     if PRINT_OUTPUT:
         print(60*'-')
+
+
+# Convert sleep time from readable form to seconds
+def convert_sleep_time(value: str) -> tuple:   
+    if value[-1].lower() == 'h':
+        hours = int(value[:-1])
+        seconds = hours * 60 * 60
+        if hours > 1:
+            unit = "hours"
+        else:
+            unit = "hour"
+    elif value[-1].lower() == 'm':
+        minutes = int(value[:-1])
+        seconds = minutes * 60
+        if minutes > 1:
+            unit = "minutes"
+        else:
+            unit = "minute"
+    elif value[-1].lower() == 'd':
+        days = int(value[:-1])
+        seconds = days * 24 * 60 * 60
+        if days > 1:
+            unit = "days"
+        else:
+            unit = "day"
+    elif value[-1].lower() == 's':
+        seconds = int(value[:-1])
+        if seconds > 1:
+            unit = "seconds"
+        else:
+            unit = "second"
+    else:
+        logprint("e", "time", "Unknown time unit, using default value '60 seconds' as sleep time")
+        unit = "seconds"
+        seconds = 60
+        
+    if VERBOSE:
+        logprint("i", "time", f"Sleep time '{value}' (= {int(value[:-1])} {unit}) converted to {seconds} seconds of sleep time")
+        
+    return (seconds, unit)
         
 
 # Project configuration
 def configuration() -> dict:
     num_of_cycles = 10
-    num_of_measurements = 10
+    num_of_measurements = 3
     
-    sleep_between_cycles = 60   # Seconds
-    sleep_between_temperature = 3    # Seconds
-    sleep_between_distance = 1    # Seconds
+    # MUST BE IN FORMAT "<number><unit>"!
+    # Available time units are 's' (seconds), 'm' (minutes), 'h' (hours), 'd' (days)
+    sleep_between_cycles = "30s"
+    sleep_between_temperature = "3s"
+    sleep_between_distance = "1s"
     
     measurement_filename = "data.json"  # Filename of the measurement file
+    num_of_send_retries = 3  # Number of measurement file send retries
     
     return {"num_of_cycles": num_of_cycles,
             "num_of_measurements": num_of_measurements,
-            "sleep_between_cycles": sleep_between_cycles,
-            "sleep_between_temperature": sleep_between_temperature,
-            "sleep_between_distance": sleep_between_distance,
-            "measurement_filename": measurement_filename}
-    
-    
-def main():
-    conf = configuration()  # Get configuration
-    measurements = {"data": []}  # Initialize measurement dictionary (JSON format)
-    pool = None
-    sonar = adafruit_hcsr04.HCSR04(trigger_pin=board.GP2, echo_pin=board.GP3 )  # Initialize sonar (distance measurement)
-    thermistor = analogio.AnalogIn(board.A0)  # Initialize thermistor (temperature measurement)
-    cycle = 1
+            "sleep_between_cycles": convert_sleep_time(sleep_between_cycles),
+            "sleep_between_temperature": convert_sleep_time(sleep_between_temperature),
+            "sleep_between_distance": convert_sleep_time(sleep_between_distance),
+            "measurement_filename": measurement_filename,
+            "num_of_send_retries": num_of_send_retries}
 
-    while True:
-        if PRINT_OUTPUT:
-            print(f"\n##### CYCLE {cycle} #####\n")
-            
-        # Turn on the built-in LED to indicate measurement start
-        led_light(1)
+    
+if __name__ == "__main__":
+    # Enable WiFi radio if disabled because of deep sleep
+    if not wifi.radio.enabled:
+        wifi.radio.enabled = True
         
-        # Connect to WiFi if not connected already
+    conf = configuration()  # Get configuration
+    
+    try:
+        with open(conf["measurement_filename"], "r") as store_file:
+            measurements = json.load(store_file)
+            
+            if VERBOSE:
+                logprint("i", "json", "Stored measurement data loaded from JSON file")
+    except Exception as e:
+        logprint("e", "json", str(e))
+        measurements = {"data": []}  # Initialize measurement dictionary (JSON format)
+    
+    pool = None
+    send_result = False
+    sonar = adafruit_hcsr04.HCSR04(trigger_pin=board.GP2, echo_pin=board.GP3)  # Initialize sonar (distance measurement)
+    thermistor = analogio.AnalogIn(board.A0)  # Initialize thermistor (temperature measurement)
+    
+    cycle = int(microcontroller.nvm[0])
+
+    #while True:
+    if PRINT_OUTPUT:
+        print(f"\n##### CYCLE {cycle} #####\n")
+        
+    # Turn on the built-in LED to indicate measurement start
+    led_light(1)
+
+    # Set internal RTC via NTP if not set already
+    if not is_rtc_set():
         if not is_wifi_connected():
             pool = connect_wifi()
             separator()
-
-        # Set internal RTC via NTP if not set already
-        if not is_rtc_set():
-            sync_ntp_to_rtc(pool, NTP_SERVER, TZ, verbose=VERBOSE, print_output=PRINT_OUTPUT)
-            separator()
-        elif VERBOSE:
-            time_data = get_format_time(time.localtime())
-            logprint("i", "ntp", f"Internal RTC already set to {time_data}, no need to update")
-            separator()
-
-        # Execute measurements
-        temperature = measure_temp(thermistor, cycles=conf["num_of_measurements"], sleeping=conf["sleep_between_temperature"])
+        sync_ntp_to_rtc(pool)
         separator()
-        distance = measure_dist(sonar, cycles=conf["num_of_measurements"], sleeping=conf["sleep_between_distance"])
+    elif VERBOSE:
+        time_data = get_format_time(time.localtime())
+        logprint("i", "ntp", f"Internal RTC already set to {time_data}, no need to update")
         separator()
-        
-        data_dict = {"temperature": temperature, "distance": distance, "timestamp": get_format_time(time.localtime())}
-        measurements["data"].append(data_dict)
-        
-        if PRINT_OUTPUT and VERBOSE:
-            print("Control output: ")
-            pretty_json = "\n".join(f'  "{k}": {repr(v)}' for k, v in data_dict.items())
-            print("{\n" + pretty_json + "\n}")
-            separator()
 
-        # Check if cycle threshold for sending measurement data is reached
-        if cycle >= conf["num_of_cycles"]:
-            send_log_file(pool, TFTP_SERVER, f"{measurements}", conf["measurement_filename"])
+    # Execute measurements
+    temperature = measure_temp(thermistor, cycles=conf["num_of_measurements"], sleeping=conf["sleep_between_temperature"][0])
+    separator()
+    distance = measure_dist(sonar, cycles=conf["num_of_measurements"], sleeping=conf["sleep_between_distance"][0])
+    separator()
+    
+    data_dict = {"temperature": temperature, "distance": distance, "timestamp": get_format_time(time.localtime())}
+    measurements["data"].append(data_dict)
+    
+    if PRINT_OUTPUT and VERBOSE:
+        print("Control output: ")
+        pretty_json = "\n".join(f'  "{k}": {repr(v)}' for k, v in data_dict.items())
+        print("{\n" + pretty_json + "\n}")
+        separator()
+
+    # Check if cycle threshold for sending measurement data is reached
+    if cycle >= conf["num_of_cycles"]:
+            # Connect to WiFi if not connected already
+        if not is_wifi_connected():
+            pool = connect_wifi()
+            separator()
+        
+        # Try to send measurement JSON file several times, if an error occures
+        retries = int(conf["num_of_send_retries"])
+        for i in range(retries):
+            send_result = send_log_file(pool, TFTP_SERVER, f"{measurements}", conf["measurement_filename"])
+            
+            if send_result:
+                measurements["data"].clear()
+                cycle = 1
+                separator()
+                break
+            else:
+                logprint("e", "tftp", "Something went wrong with the transfer, trying again...")
+                
+        if not send_result:
             measurements["data"].clear()
             cycle = 1
             separator()
-        else:
-            cycle += 1
+            logprint("e", "tftp", "Reached retry limit, sending failed, will try again next time")
+    else:
+        cycle += 1
 
-        # Turn off the built-in LED to indicate measurement stop
-        led_light(0)
-        
-        sleep_period = conf["sleep_between_cycles"]   # Sleep between measurements
-        if PRINT_OUTPUT:
-            print(f"Going to sleep for {sleep_period} seconds...")
-            separator()
-        time.sleep(sleep_period)
+    # Turn off the built-in LED to indicate measurement stop
+    led_light(0)
     
+    sleep_period = conf["sleep_between_cycles"][0]   # Sleep between measurements
+    if PRINT_OUTPUT:
+        print(f"Going to deep sleep for {sleep_period} seconds...")
+        separator()
+    
+    if not is_wifi_connected():
+        wifi.radio.enabled = False
 
-main()
+    microcontroller.nvm[0] = cycle  # Save cycle counter in non-volatile memory
+
+    with open(conf["measurement_filename"], "w") as store_file:
+        json.dump(measurements, store_file)
+        
+    time.sleep(5)
+    
+    time_alarm = alarm.time.TimeAlarm(monotonic_time=time.monotonic() + sleep_period)
+    alarm.exit_and_deep_sleep_until_alarms(time_alarm)        
+
+#main()
